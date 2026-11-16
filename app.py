@@ -24,6 +24,17 @@ from procurement.ui.theme import apply_theme
 apply_theme()
 
 
+@st.cache_resource(show_spinner="Starting the supplier sites and browser…")
+def _cloud_services():
+    """Runs once per server process (see procurement/cloud_boot.py)."""
+    from procurement.cloud_boot import start
+
+    return start()
+
+
+_cloud_services()
+
+
 @st.cache_resource
 def get_engine():
     """One engine per process; create tables and seed on first use."""
