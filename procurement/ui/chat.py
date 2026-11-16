@@ -253,6 +253,7 @@ def render(engine, user: dict) -> None:
                     source="chat",
                 )
                 order_service.submit_order(session, order)
+                start_research_thread(engine, order.id)
                 chat_service.link_order(session, row, order.id)
                 st.session_state.draft = None
                 chat_service.save_draft(session, row, "null")
