@@ -112,6 +112,7 @@ class OfferEvidence(BaseModel):
     supplier_id: str
     product_id: str
     category: str
+    model_name: str | None = None
     currency: Currency = Currency.HKD
     unit_price_minor: int | None = None
     available_quantity: int | None = None

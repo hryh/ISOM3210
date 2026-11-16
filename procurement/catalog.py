@@ -43,6 +43,11 @@ class CategorySpec:
 #: Short codes used in product IDs.
 CATEGORY_CODES = {"monitor": "MON", "keyboard": "KEY", "chair": "CHA"}
 
+#: Free-text category id. Requests outside the typed catalog are searched as
+#: natural language ("noise cancelling headphones") and validated by keyword
+#: presence instead of typed attributes.
+OTHER_CATEGORY = "other"
+
 CATEGORIES: dict[str, CategorySpec] = {
     "monitor": CategorySpec(
         id="monitor",

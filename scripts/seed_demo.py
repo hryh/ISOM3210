@@ -1,41 +1,30 @@
-"""Populate the SQLite database with seeded synthetic data for a demo.
+"""Reset the SQLite database and seed core demo data.
 
 Usage: ``uv run python scripts/seed_demo.py``
+
+Drops everything (demo data is disposable), then seeds the admin manager user
+and the three mock suppliers the agent browses.
 """
 
 from __future__ import annotations
 
-from procurement import seed as seed_module
-from procurement.repository import (
-    Supplier,
-    create_engine_from_url,
-    init_db,
-    session_factory,
-)
+from procurement.repository import create_engine_from_url, reset_db, session_factory
+from procurement.seed import seed_core
 
 
 def main() -> None:
     engine = create_engine_from_url()
-    init_db(engine)
+    reset_db(engine)
+
     Session = session_factory(engine)
-
-    data = seed_module.generate()
-
     with Session() as session:
-        session.query(Supplier).delete()
-        for sup in data.suppliers:
-            session.add(
-                Supplier(
-                    id=sup.id,
-                    name=sup.name,
-                    allowed_origin=sup.origin,
-                    approval_status="allowed",
-                )
-            )
-        session.commit()
+        seeded = seed_core(session)
 
-    print(f"Seeded {len(data.suppliers)} suppliers and {len(data.listings)} listings "
-          f"(seed={data.seed})")
+    print(
+        f"Seeded admin user (id={seeded['admin']}) and "
+        f"{seeded['suppliers']} suppliers."
+    )
+    print("Demo login: admin / admin123 (override with DEMO_ADMIN_PASSWORD).")
 
 
 if __name__ == "__main__":

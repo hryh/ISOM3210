@@ -11,8 +11,10 @@ the agent can never shortcut supplier research by reading seed data (§10).
 
 from __future__ import annotations
 
+import os
 import random
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 
 from .catalog import CATEGORY_CODES
 
@@ -148,3 +150,61 @@ def generate(seed: int = SEED) -> SeedData:
         ground_truth=ground_truth,
         seed=seed,
     )
+
+
+#: Default base URL of the mock-site server (all three suppliers share one app).
+DEFAULT_MOCK_BASE_URL = "http://127.0.0.1:8100"
+
+ADMIN_USERNAME = "admin"
+ADMIN_DISPLAY_NAME = "Admin"
+ADMIN_DEFAULT_PASSWORD = "admin123"
+
+
+def seed_core(session) -> dict:
+    """Seed the admin user and the three mock suppliers (idempotent).
+
+    The mock suppliers all live on one FastAPI app; each row's ``origin`` is the
+    shared base URL, resolvable via the ``MOCK_BASE_URL`` env var so live-site
+    URLs can replace them later without code changes.
+    """
+    from . import auth
+    from .repository import Supplier, User
+
+    now = datetime.now(timezone.utc)
+    base_url = os.getenv("MOCK_BASE_URL", DEFAULT_MOCK_BASE_URL).rstrip("/")
+    seeded: dict[str, int | None] = {}
+
+    admin = session.query(User).filter_by(username=ADMIN_USERNAME).one_or_none()
+    if admin is None:
+        admin = User(
+            username=ADMIN_USERNAME,
+            display_name=ADMIN_DISPLAY_NAME,
+            role="manager",
+            password_hash=auth.hash_password(
+                os.getenv("DEMO_ADMIN_PASSWORD", ADMIN_DEFAULT_PASSWORD)
+            ),
+            active=True,
+            created_at=now,
+        )
+        session.add(admin)
+        session.flush()
+    seeded["admin"] = admin.id
+
+    for sup in generate().suppliers:
+        row = session.query(Supplier).filter_by(name=sup.name).one_or_none()
+        if row is None:
+            session.add(
+                Supplier(
+                    name=sup.name,
+                    origin=base_url,
+                    status="approved",
+                    added_by=admin.id,
+                    notes="Mock supplier site (seeded).",
+                    created_at=now,
+                )
+            )
+    session.commit()
+    seeded["suppliers"] = (
+        session.query(Supplier).count()
+    )
+    return seeded

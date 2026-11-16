@@ -1,170 +1,126 @@
-"""PurchasePilot — Streamlit app.
+"""PurchasePilot — Streamlit app shell.
 
-The request-capture step is a stateful LLM chatbot: the user describes their
-need in natural language, the LLM merges it into a running ``RequestDraft``,
-the app shows a confirmation block, and on confirm a deterministic
-``PurchaseRequest`` is handed to the workflow controller.
-
-All workflow state lives in ``st.session_state`` (backed by the controller), so
-Streamlit reruns cannot restart research or repeat writes.
+Login gate + a sidebar navigation over the six pages. All persistent state
+lives in SQLite; the agent blackbox runs in background threads writing order
+status, so Streamlit reruns never restart research.
 """
 
 from __future__ import annotations
 
-import asyncio
-
 import streamlit as st
 from dotenv import load_dotenv
 
-from procurement.catalog import CATEGORIES
-from procurement.controller import WorkflowController
-from procurement.llm.adapter import ConfigurableLLM
-from procurement.parsing import ClarificationNeeded, draft_to_request
-from procurement.schemas import RequestDraft
-from procurement.states import WorkflowState
-
 load_dotenv()
 
-st.set_page_config(page_title="PurchasePilot", layout="wide")
-st.title("PurchasePilot")
-st.caption("Describe what you need — I'll confirm a structured request before research.")
+st.set_page_config(
+    page_title="PurchasePilot", page_icon=":material/shopping_cart:", layout="wide"
+)
+
+from procurement.ui.theme import apply_theme
+
+apply_theme()
 
 
-def _init_state() -> None:
-    if "messages" not in st.session_state:
-        st.session_state.messages = []
-    if "controller" not in st.session_state:
-        st.session_state.controller = WorkflowController(
-            run_id="chat-run", request_id="REQ_001"
+@st.cache_resource
+def get_engine():
+    """One engine per process; create tables and seed on first use."""
+    from procurement.repository import create_engine_from_url, init_and_seed
+
+    engine = create_engine_from_url()
+    init_and_seed(engine)
+    return engine
+
+
+engine = get_engine()
+
+if "user" not in st.session_state:
+    st.session_state.user = None
+
+from procurement import order_service
+from procurement.repository import session_factory
+from procurement.ui import (
+    approvals,
+    chat,
+    history,
+    login,
+    suppliers_page,
+    users_page,
+    wizard,
+)
+
+if st.session_state.user is None:
+    login.render(engine)
+    st.stop()
+
+user = st.session_state.user
+is_manager = user["role"] == "manager"
+
+# Approval count (managers only) — refreshed every rerun.
+pending_count = 0
+if is_manager:
+    Session = session_factory(engine)
+    with Session() as session:
+        pending_count = len(order_service.pending_approvals(session))
+
+
+def _chat_page():
+    chat.render(engine, user)
+
+
+def _wizard_page():
+    wizard.render(engine, user)
+
+
+def _history_page():
+    history.render(engine, user)
+
+
+def _approvals_page():
+    approvals.render(engine, user)
+
+
+def _suppliers_page():
+    suppliers_page.render(engine, user)
+
+
+def _users_page():
+    users_page.render(engine, user)
+
+
+approvals_title = "Pending Approvals" + (f" ({pending_count})" if pending_count else "")
+
+pages = [
+    st.Page(_chat_page, title="Chatbot", icon=":material/forum:", default=True),
+    st.Page(_wizard_page, title="Order Request", icon=":material/edit_note:"),
+    st.Page(_history_page, title="All Orders", icon=":material/receipt_long:"),
+]
+if is_manager:
+    pages.append(
+        st.Page(
+            _approvals_page, title=approvals_title, icon=":material/fact_check:"
         )
-    if "draft" not in st.session_state:
-        st.session_state.draft: RequestDraft | None = None
-    if "request" not in st.session_state:
-        st.session_state.request = None
-    if "confirmed" not in st.session_state:
-        st.session_state.confirmed = False
+    )
+pages.append(st.Page(_suppliers_page, title="Suppliers", icon=":material/storefront:"))
+if is_manager:
+    pages.append(
+        st.Page(_users_page, title="User Management", icon=":material/manage_accounts:")
+    )
 
+nav = st.navigation(pages)
 
-def _update_draft(text: str, current: RequestDraft | None) -> RequestDraft:
-    async def _run() -> RequestDraft:
-        llm = ConfigurableLLM()
-        return await llm.update_draft(text, current)
-
-    return asyncio.run(_run())
-
-
-def _draft_markdown(d: RequestDraft) -> str:
-    lines = [
-        f"- **Category:** {d.category or '—'}",
-        f"- **Quantity:** {d.quantity or '—'}",
-    ]
-    spec = CATEGORIES.get(d.category or "")
-    if spec is not None:
-        for attr in spec.attributes:
-            value = d.attributes.get(attr.name)
-            lines.append(
-                f"- **{attr.display_name}:** "
-                f"{value if value not in (None, '') else '—'}"
-            )
-    lines.append(f"- **Minimum warranty:** {d.warranty_months_min or '—'} months")
-    lines.append(f"- **Budget (max):** HK${d.max_total_hkd}")
-    lines.append(f"- **Deadline:** {d.deadline or '—'}")
-    lines.append(f"- **Department:** {d.department or '—'}")
-    if d.preferences:
-        lines.append(f"- **Preferences:** {d.preferences}")
-    return "\n".join(lines)
-
-
-_init_state()
-
-for msg in st.session_state.messages:
-    with st.chat_message(msg["role"]):
-        st.markdown(msg["content"])
-
-if not st.session_state.messages:
-    with st.chat_message("assistant"):
-        st.markdown(
-            "Hi! I source office equipment — **monitors, keyboards, and chairs**. "
-            "Describe what you need, e.g.:\n\n"
-            "> 6 monitors, 27 inch, 2560x1440, HDMI and DisplayPort, 3-year "
-            "warranty, budget HK$8,000, deliver by 2026-11-20, for the "
-            "engineering team."
-        )
-
-prompt = st.chat_input("Describe your purchase request…")
-
-if prompt:
-    st.session_state.messages.append({"role": "user", "content": prompt})
-    with st.chat_message("user"):
-        st.markdown(prompt)
-
-    try:
-        draft = _update_draft(prompt, st.session_state.draft)
-    except Exception as exc:  # network / key / parse failure
-        msg = f"Sorry, I couldn't process that: {exc}"
-        st.session_state.messages.append({"role": "assistant", "content": msg})
-        with st.chat_message("assistant"):
-            st.error(msg)
-        st.stop()
-
-    # Form question (not request detail): answer it, keep the draft unchanged.
-    if draft.answer:
-        st.session_state.messages.append({"role": "assistant", "content": draft.answer})
-        with st.chat_message("assistant"):
-            st.markdown(draft.answer)
-        st.stop()
-
-    st.session_state.draft = draft
-
-    if draft.clarification_needed:
-        fields = ", ".join(draft.unclear_fields) or "some details"
-        msg = f"I need a bit more detail on: **{fields}**. Could you clarify?"
-        st.session_state.messages.append({"role": "assistant", "content": msg})
-        with st.chat_message("assistant"):
-            st.markdown(msg)
-        st.stop()
-
-    try:
-        request = draft_to_request(
-            draft, request_id="REQ_001", requester="chat-user"
-        )
-    except ClarificationNeeded as exc:
-        fields = ", ".join(exc.missing_fields)
-        msg = f"I still need: **{fields}**. Could you clarify?"
-        st.session_state.messages.append({"role": "assistant", "content": msg})
-        with st.chat_message("assistant"):
-            st.markdown(msg)
-        st.stop()
-
-    st.session_state.request = request
-
-    parts = ["Here's what I understood:\n\n" + _draft_markdown(draft)]
-    if draft.out_of_scope:
-        parts.append(
-            "\n*(Note: I only source office equipment — ignoring: "
-            + ", ".join(draft.out_of_scope)
-            + ".)*"
-        )
-    summary = "\n".join(parts)
-    st.session_state.messages.append({"role": "assistant", "content": summary})
-    with st.chat_message("assistant"):
-        st.markdown(summary)
-
-if st.session_state.draft is not None and not st.session_state.confirmed:
-    col1, col2 = st.columns(2)
-    if col1.button("Confirm", type="primary"):
-        st.session_state.confirmed = True
-        st.session_state.controller.transition_to(WorkflowState.RESEARCHING)
-    if col2.button("Edit"):
-        st.session_state.draft = None
-        st.session_state.request = None
-        msg = "Sure — what would you like to change?"
-        st.session_state.messages.append({"role": "assistant", "content": msg})
+# ---- sidebar identity ----------------------------------------------------------
+with st.sidebar:
+    st.markdown(
+        f"**{user['display_name']}**  \n"
+        f'<span class="pp-badge pp-badge--neutral">{user["role"].title()}</span>',
+        unsafe_allow_html=True,
+    )
+    st.divider()
+    if st.button("Log out", use_container_width=True):
+        st.session_state.user = None
+        st.session_state.pop("chat_session_id", None)
+        st.session_state.pop("draft", None)
+        st.session_state.pop("draft_for_session", None)
         st.rerun()
 
-if st.session_state.confirmed:
-    st.success(
-        f"Request confirmed — workflow advanced to "
-        f"**{st.session_state.controller.state.value}**."
-    )
-    st.caption("(Research / comparison / approval screens come in later phases.)")
+nav.run()

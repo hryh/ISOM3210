@@ -10,10 +10,11 @@ pass or a fail.
 
 from __future__ import annotations
 
+import re
 from collections.abc import Iterable, Sequence
 from datetime import date
 
-from .catalog import BOOL, CATEGORIES, INT, LIST, STR, AttributeSpec
+from .catalog import BOOL, CATEGORIES, INT, LIST, OTHER_CATEGORY, STR, AttributeSpec
 from .money import verified_total
 from .schemas import (
     ApprovalRole,
@@ -22,6 +23,7 @@ from .schemas import (
     FieldValidation,
     OfferEvidence,
     PurchaseRequest,
+    RequestRequirements,
     ValidationStatus,
 )
 
@@ -52,6 +54,97 @@ def resolved_total_minor(offer: OfferEvidence, quantity: int) -> int | None:
     if offer.unit_price_minor is None or offer.shipping_minor is None:
         return None
     return verified_total(offer.unit_price_minor, quantity, offer.shipping_minor)
+
+
+def _keyword_checks(req: RequestRequirements, offer: OfferEvidence) -> list[FieldValidation]:
+    """Free-text category validation: every requested keyword must appear in
+    the offer's extracted specifications text (or its model name).
+
+    Deterministic substring matching — the LLM only extracted the text; Python
+    decides eligibility. Matching is normalized (case, hyphens, punctuation)
+    so "noise cancelling" matches "Noise-Cancelling". A keyword nobody stated
+    is UNKNOWN, never assumed.
+    """
+    def normalize(text: str) -> str:
+        return re.sub(r"[^a-z0-9\u4e00-\u9fff]+", " ", text.lower()).strip()
+
+    spec_text = normalize(
+        " ".join(
+            str(v)
+            for v in (offer.model_name, offer.attributes.get("specifications"), " ")
+            if v
+        )
+    )
+    checks: list[FieldValidation] = []
+    keywords = req.attributes.get("keywords") or []
+    for keyword in keywords:
+        if not isinstance(keyword, str) or not keyword.strip():
+            continue
+        if normalize(keyword) in spec_text:
+            checks.append(
+                _check(keyword.strip(), ValidationStatus.PASS, "appears in the product specifications")
+            )
+        else:
+            checks.append(
+                _check(keyword.strip(), ValidationStatus.FAIL, "not found in the extracted specifications")
+            )
+    if not checks:
+        checks.append(
+            _check("item keywords", ValidationStatus.UNKNOWN, "no required keywords were extracted")
+        )
+    return checks
+
+
+#: Textual stock evidence (aggregator sites) counts as availability, with the
+#: count left unverified. Only these explicit in-stock phrases qualify.
+#: Out-of-stock is checked FIRST so "無存貨" is never mistaken for stock.
+_IN_STOCK_PATTERNS = ("有貨", "有存貨", "現貨", "in stock", "available")
+_OUT_OF_STOCK_PATTERNS = ("缺貨", "無存貨", "售罄", "已售完", "out of stock", "sold out")
+
+
+def _quantity_check(
+    request: PurchaseRequest, offer: OfferEvidence
+) -> FieldValidation:
+    """Rule 3: a supplier must cover the entire quantity.
+
+    A numeric stock count at/above the quantity is full evidence. Aggregator
+    offers rarely show counts, so availability comes from the extractor's
+    classification ('in_stock' / 'low_stock' / 'preorder' pass with the count
+    left unverified; 'out_of_stock' fails) or — failing that — explicit
+    in-stock phrases in the raw text. Everything else is UNKNOWN. The raw
+    availability text is always kept for the human approver.
+    """
+    if offer.available_quantity is None:
+        state = str(offer.attributes.get("stock_state") or "").lower()
+        if state in ("in_stock", "low_stock"):
+            note = "low stock" if state == "low_stock" else "in stock"
+            return _check(
+                "available_quantity",
+                ValidationStatus.PASS,
+                f"listed as {note} (count not shown)",
+            )
+        if state == "preorder":
+            return _check(
+                "available_quantity",
+                ValidationStatus.PASS,
+                "orderable, ships in a few days (count not shown)",
+            )
+        if state == "out_of_stock":
+            return _check("available_quantity", ValidationStatus.FAIL, "listed as out of stock")
+        # Fall back to the raw availability text.
+        stock_status = str(offer.attributes.get("stock_status") or "").lower()
+        if any(p in stock_status for p in _OUT_OF_STOCK_PATTERNS):
+            return _check("available_quantity", ValidationStatus.FAIL, "listed as out of stock")
+        if any(p in stock_status for p in _IN_STOCK_PATTERNS):
+            return _check(
+                "available_quantity",
+                ValidationStatus.PASS,
+                "listed as in stock (count not shown)",
+            )
+        return _check("available_quantity", ValidationStatus.UNKNOWN, "available quantity not extracted")
+    if offer.available_quantity < request.quantity:
+        return _check("available_quantity", ValidationStatus.FAIL, "insufficient stock for full quantity")
+    return _check("available_quantity", ValidationStatus.PASS, "sufficient stock for full quantity")
 
 
 def _check(
@@ -116,7 +209,12 @@ def validate_offer(
     req = request.mandatory
 
     spec = CATEGORIES.get(req.category)
-    if spec is None:
+    if req.category == OTHER_CATEGORY:
+        # Free-text category: deterministic keyword matching against the
+        # offer's extracted specifications. The offer itself is labeled
+        # "other" by the extraction, so no category mismatch is possible.
+        checks.extend(_keyword_checks(req, offer))
+    elif spec is None:
         checks.append(
             _check("category", ValidationStatus.FAIL, f"unknown category {req.category!r}")
         )
@@ -146,17 +244,26 @@ def validate_offer(
             checks.append(_check("warranty_months", ValidationStatus.FAIL, "warranty below minimum"))
 
     # Quantity sufficiency (rule 3): a supplier must cover the entire quantity.
-    if offer.available_quantity is None:
-        checks.append(_check("available_quantity", ValidationStatus.UNKNOWN, "available quantity not extracted"))
-    elif offer.available_quantity < request.quantity:
-        checks.append(_check("available_quantity", ValidationStatus.FAIL, "insufficient stock for full quantity"))
-    else:
-        checks.append(_check("available_quantity", ValidationStatus.PASS, "sufficient stock for full quantity"))
+    checks.append(_quantity_check(request, offer))
 
-    # Verified total and budget (rule 5).
+    # Verified total and budget (rule 5). When shipping is unknown (common on
+    # aggregator sites), the total is verified WITHOUT shipping and the check
+    # says so — the manager sees the unverified shipping on the approval card.
     total = resolved_total_minor(offer, request.quantity)
-    if total is None:
-        checks.append(_check("verified_total", ValidationStatus.UNKNOWN, "unit price or shipping unresolved"))
+    shipping_unverified = offer.shipping_minor is None
+    if offer.unit_price_minor is None:
+        checks.append(_check("verified_total", ValidationStatus.UNKNOWN, "unit price unresolved"))
+        total = None
+    elif total is None:
+        total = offer.unit_price_minor * request.quantity
+        if total > request.max_total_cost_minor:
+            checks.append(
+                _check("verified_total", ValidationStatus.FAIL, "exceeds request budget (shipping unverified, excluded)")
+            )
+        else:
+            checks.append(
+                _check("verified_total", ValidationStatus.PASS, "within budget (shipping unverified, excluded)")
+            )
     else:
         if total > request.max_total_cost_minor:
             checks.append(_check("verified_total", ValidationStatus.FAIL, "exceeds request budget"))

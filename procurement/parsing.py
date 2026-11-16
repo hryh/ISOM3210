@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from datetime import date, datetime, timezone
 
-from .catalog import CATEGORIES
+from .catalog import CATEGORIES, OTHER_CATEGORY
 from .money import parse_hkd_minor
 from .schemas import PurchaseRequest, RequestDraft, RequestRequirements
 
@@ -55,8 +55,16 @@ def draft_to_request(
 
     if draft.clarification_needed:
         missing.extend(draft.unclear_fields)
-    if draft.category is None or draft.category not in CATEGORIES:
+    if draft.category is None or (
+        draft.category not in CATEGORIES and draft.category != OTHER_CATEGORY
+    ):
         missing.append("category")
+    if draft.category == OTHER_CATEGORY:
+        if not draft.attributes.get("item"):
+            missing.append("item description")
+        keywords = draft.attributes.get("keywords")
+        if not isinstance(keywords, list) or not keywords:
+            missing.append("required keywords")
     if not draft.quantity or draft.quantity <= 0:
         missing.append("quantity")
     if not draft.department:
@@ -77,15 +85,21 @@ def draft_to_request(
         raise ClarificationNeeded(["deadline"], "could not parse the deadline")
 
     # Enforce required attributes for the chosen category.
-    spec = CATEGORIES[draft.category]
-    attributes = dict(draft.attributes)
-    missing_attrs = [
-        f"attributes.{attr.name}"
-        for attr in spec.attributes
-        if attr.required and attributes.get(attr.name) in (None, "", [])
-    ]
-    if missing_attrs:
-        raise ClarificationNeeded(missing_attrs)
+    if draft.category == OTHER_CATEGORY:
+        attributes = {
+            "item": str(draft.attributes.get("item", "")).strip(),
+            "keywords": [str(k).strip() for k in (draft.attributes.get("keywords") or []) if str(k).strip()],
+        }
+    else:
+        spec = CATEGORIES[draft.category]
+        attributes = dict(draft.attributes)
+        missing_attrs = [
+            f"attributes.{attr.name}"
+            for attr in spec.attributes
+            if attr.required and attributes.get(attr.name) in (None, "", [])
+        ]
+        if missing_attrs:
+            raise ClarificationNeeded(missing_attrs)
 
     requirements = RequestRequirements(
         category=draft.category,

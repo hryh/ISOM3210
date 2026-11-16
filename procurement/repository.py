@@ -1,15 +1,31 @@
-"""SQLAlchemy models and session setup.
+"""SQLAlchemy models and session setup — human-record schema.
 
-Nine core tables mirror §8 of the proposal. Money columns are integer minor
-units; timestamps are timezone aware. SQLite is the default backend.
+Seven tables store everything the UI needs: users, suppliers, products
+(scraped by the agent), orders, human decisions, and chat persistence.
+
+The agent's internals (runs, audit events, evidence, proposals) are
+deliberately NOT persisted — the database is the human record, the agent is a
+blackbox. Money columns are integer minor units (HKD cents); timestamps are
+timezone aware.
 """
 
 from __future__ import annotations
 
 import os
-from datetime import datetime
+from datetime import date, datetime
 
-from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, String, Text, create_engine
+from sqlalchemy import (
+    Boolean,
+    Date,
+    DateTime,
+    ForeignKey,
+    Integer,
+    String,
+    Text,
+    UniqueConstraint,
+    create_engine,
+    event,
+)
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, sessionmaker
 
 
@@ -17,114 +33,117 @@ class Base(DeclarativeBase):
     pass
 
 
-class Request(Base):
-    __tablename__ = "requests"
+class User(Base):
+    __tablename__ = "users"
 
-    id: Mapped[str] = mapped_column(String, primary_key=True)
-    requester: Mapped[str] = mapped_column(String)
-    department: Mapped[str] = mapped_column(String)
-    category: Mapped[str] = mapped_column(String, default="monitor")
-    quantity: Mapped[int] = mapped_column(Integer)
-    currency: Mapped[str] = mapped_column(String, default="HKD")
-    budget_minor: Mapped[int] = mapped_column(Integer)
-    deadline: Mapped[str] = mapped_column(String)
-    requirements_json: Mapped[str] = mapped_column(Text, default="{}")
-    status: Mapped[str] = mapped_column(String, default="DRAFT")
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    username: Mapped[str] = mapped_column(String, unique=True)
+    display_name: Mapped[str] = mapped_column(String)
+    role: Mapped[str] = mapped_column(String, default="employee")
+    password_hash: Mapped[str] = mapped_column(String)
+    active: Mapped[bool] = mapped_column(Boolean, default=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
-
-
-class Run(Base):
-    __tablename__ = "runs"
-
-    id: Mapped[str] = mapped_column(String, primary_key=True)
-    request_id: Mapped[str] = mapped_column(ForeignKey("requests.id"))
-    state: Mapped[str] = mapped_column(String, default="DRAFT")
-    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
-    ended_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
-    max_pages: Mapped[int] = mapped_column(Integer, default=30)
-    max_actions: Mapped[int] = mapped_column(Integer, default=200)
-    max_seconds: Mapped[int] = mapped_column(Integer, default=600)
 
 
 class Supplier(Base):
     __tablename__ = "suppliers"
 
-    id: Mapped[str] = mapped_column(String, primary_key=True)
-    name: Mapped[str] = mapped_column(String)
-    allowed_origin: Mapped[str] = mapped_column(String)
-    approval_status: Mapped[str] = mapped_column(String, default="allowed")
-
-
-class Offer(Base):
-    __tablename__ = "offers"
-
-    id: Mapped[str] = mapped_column(String, primary_key=True)
-    supplier_id: Mapped[str] = mapped_column(ForeignKey("suppliers.id"))
-    product_id: Mapped[str] = mapped_column(String)
-    unit_price_minor: Mapped[int | None] = mapped_column(Integer, nullable=True)
-    available_quantity: Mapped[int | None] = mapped_column(Integer, nullable=True)
-    shipping_minor: Mapped[int | None] = mapped_column(Integer, nullable=True)
-    warranty_months: Mapped[int | None] = mapped_column(Integer, nullable=True)
-    delivery_by: Mapped[str | None] = mapped_column(String, nullable=True)
-
-
-class Evidence(Base):
-    __tablename__ = "evidence"
-
-    id: Mapped[str] = mapped_column(String, primary_key=True)
-    offer_id: Mapped[str] = mapped_column(ForeignKey("offers.id"))
-    url: Mapped[str] = mapped_column(String)
-    retrieved_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
-    field: Mapped[str] = mapped_column(String)
-    extracted_value: Mapped[str | None] = mapped_column(String, nullable=True)
-    source_excerpt: Mapped[str | None] = mapped_column(Text, nullable=True)
-
-
-class Proposal(Base):
-    __tablename__ = "proposals"
-
-    id: Mapped[str] = mapped_column(String, primary_key=True)
-    request_id: Mapped[str] = mapped_column(ForeignKey("requests.id"))
-    version: Mapped[int] = mapped_column(Integer)
-    selected_offer_id: Mapped[str] = mapped_column(ForeignKey("offers.id"))
-    portal_payload_json: Mapped[str] = mapped_column(Text)
-    policy_version: Mapped[str] = mapped_column(String)
-    budget_snapshot_minor: Mapped[int] = mapped_column(Integer)
-    hash: Mapped[str] = mapped_column(String, unique=True)
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    name: Mapped[str] = mapped_column(String, unique=True)
+    origin: Mapped[str] = mapped_column(String)
+    #: Aggregator suppliers: catalog/search entry URL, optionally containing a
+    #: "{query}" placeholder. When set, research skips the homepage and goes
+    #: straight here (and scrapes product pages deeply). Null for plain
+    #: catalog sites (mock world).
+    catalog_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    status: Mapped[str] = mapped_column(String, default="approved")
+    added_by: Mapped[int | None] = mapped_column(
+        ForeignKey("users.id"), nullable=True
+    )
+    notes: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
 
 
-class Approval(Base):
-    __tablename__ = "approvals"
+class Product(Base):
+    __tablename__ = "products"
+    __table_args__ = (UniqueConstraint("supplier_id", "product_key"),)
 
-    id: Mapped[str] = mapped_column(String, primary_key=True)
-    proposal_hash: Mapped[str] = mapped_column(ForeignKey("proposals.hash"))
-    reviewer: Mapped[str] = mapped_column(String)
-    role: Mapped[str] = mapped_column(String)
-    decision: Mapped[str] = mapped_column(String)
-    exceptions_approved_json: Mapped[str] = mapped_column(Text, default="[]")
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    supplier_id: Mapped[int] = mapped_column(ForeignKey("suppliers.id"))
+    product_key: Mapped[str] = mapped_column(String)
+    model_name: Mapped[str | None] = mapped_column(String, nullable=True)
+    category: Mapped[str] = mapped_column(String)
+    attributes_json: Mapped[str] = mapped_column(Text, default="{}")
+    #: Nullable on purpose — "unknown" is meaningful (three-valued logic).
+    unit_price_minor: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    shipping_minor: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    available_quantity: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    warranty_months: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    delivery_days: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    last_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
+class Order(Base):
+    __tablename__ = "orders"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    order_no: Mapped[str] = mapped_column(String, unique=True)
+    requester_id: Mapped[int] = mapped_column(ForeignKey("users.id"))
+    department: Mapped[str] = mapped_column(String)
+    category: Mapped[str] = mapped_column(String)
+    quantity: Mapped[int] = mapped_column(Integer)
+    budget_minor: Mapped[int] = mapped_column(Integer)
+    deadline: Mapped[date] = mapped_column(Date)
+    requirements_json: Mapped[str] = mapped_column(Text, default="{}")
+    preferences_json: Mapped[str] = mapped_column(Text, default="{}")
+    selected_product_id: Mapped[int | None] = mapped_column(
+        ForeignKey("products.id"), nullable=True
+    )
+    status: Mapped[str] = mapped_column(String, default="DRAFT")
+    source: Mapped[str] = mapped_column(String, default="wizard")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    decided_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    placed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+
+
+class OrderDecision(Base):
+    __tablename__ = "order_decisions"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    order_id: Mapped[int] = mapped_column(ForeignKey("orders.id"))
+    decision: Mapped[str] = mapped_column(String)  # approved | rejected | cancelled
+    decided_by: Mapped[int] = mapped_column(ForeignKey("users.id"))
+    role: Mapped[str] = mapped_column(String)  # snapshot of decider's role
+    reason: Mapped[str | None] = mapped_column(Text, nullable=True)
     decided_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
 
 
-class Submission(Base):
-    __tablename__ = "submissions"
-
-    id: Mapped[str] = mapped_column(String, primary_key=True)
-    request_key: Mapped[str] = mapped_column(String, unique=True)
-    proposal_id: Mapped[str] = mapped_column(ForeignKey("proposals.id"))
-    portal_record_id: Mapped[str | None] = mapped_column(String, nullable=True)
-    verification_status: Mapped[str] = mapped_column(String, default="pending")
-
-
-class AuditEvent(Base):
-    __tablename__ = "audit_events"
+class ChatSession(Base):
+    __tablename__ = "chat_sessions"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    run_id: Mapped[str | None] = mapped_column(ForeignKey("runs.id"), nullable=True)
-    actor: Mapped[str] = mapped_column(String)
-    action: Mapped[str] = mapped_column(String)
-    result: Mapped[str] = mapped_column(String)
-    metadata_json: Mapped[str] = mapped_column(Text, default="{}")
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"))
+    title: Mapped[str] = mapped_column(String, default="New chat")
+    draft_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    order_id: Mapped[int | None] = mapped_column(
+        ForeignKey("orders.id"), nullable=True
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
+class ChatMessage(Base):
+    __tablename__ = "chat_messages"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    session_id: Mapped[int] = mapped_column(ForeignKey("chat_sessions.id"))
+    role: Mapped[str] = mapped_column(String)  # user | assistant
+    content: Mapped[str] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
 
 
@@ -133,10 +152,38 @@ def default_database_url() -> str:
 
 
 def create_engine_from_url(url: str | None = None):
-    return create_engine(url or default_database_url())
+    """Create the engine. SQLite needs cross-thread access for background research."""
+    url = url or default_database_url()
+    engine = create_engine(url, connect_args={"check_same_thread": False})
+    if url.startswith("sqlite"):
+        @event.listens_for(engine, "connect")
+        def _fk_on(dbapi_connection, connection_record):  # pragma: no cover
+            cursor = dbapi_connection.cursor()
+            cursor.execute("PRAGMA foreign_keys=ON")
+            cursor.close()
+
+    return engine
 
 
 def init_db(engine) -> None:
+    Base.metadata.create_all(engine)
+
+
+def reset_db(engine) -> None:
+    """Drop everything and recreate. Demo data is disposable.
+
+    Drops *all* tables actually present in the DB — including leftovers from
+    a previous schema — so stale databases (e.g. the old agent-centric tables,
+    where ``offers`` referenced ``suppliers``) reset cleanly. FK enforcement is
+    disabled for the dropping connection; note SQLite silently ignores the
+    pragma inside a transaction, hence the AUTOCOMMIT connection.
+    """
+    from sqlalchemy import inspect
+
+    with engine.connect().execution_options(isolation_level="AUTOCOMMIT") as conn:
+        conn.exec_driver_sql("PRAGMA foreign_keys=OFF")
+        for table in inspect(conn).get_table_names():
+            conn.exec_driver_sql(f'DROP TABLE IF EXISTS "{table}"')
     Base.metadata.create_all(engine)
 
 
@@ -144,76 +191,111 @@ def session_factory(engine):
     return sessionmaker(bind=engine, autoflush=False, expire_on_commit=False)
 
 
-def init_and_seed(engine) -> None:
-    """Create tables and seed suppliers (idempotent)."""
-    init_db(engine)
-    from .seed import generate
+def _is_stale_schema(engine) -> bool:
+    """True when the DB still carries the old agent-centric tables."""
+    from sqlalchemy import inspect
 
-    data = generate()
+    tables = set(inspect(engine).get_table_names())
+    return bool(tables & {"requests", "runs", "offers", "evidence", "proposals"})
+
+
+def _ensure_columns(engine) -> None:
+    """Lightweight auto-migration: add missing columns to existing tables.
+
+    SQLite ``create_all`` never alters existing tables, so a DB created before
+    a column existed would crash at runtime. Each new column is registered
+    here with the exact ALTER statement to apply.
+    """
+    from sqlalchemy import inspect, text
+
+    migrations: dict[str, list[str]] = {
+        "suppliers": ["ALTER TABLE suppliers ADD COLUMN catalog_url TEXT"],
+    }
+    inspector = inspect(engine)
+    existing = set(inspector.get_table_names())
+    if not existing:
+        return  # fresh DB — create_all builds the current schema anyway
+    with engine.begin() as conn:
+        for table, statements in migrations.items():
+            if table not in existing:
+                continue
+            columns = {c["name"] for c in inspector.get_columns(table)}
+            for statement in statements:
+                column = statement.split("ADD COLUMN ", 1)[1].split()[0]
+                if column not in columns:
+                    conn.execute(text(statement))
+
+
+def init_and_seed(engine) -> None:
+    """Create tables and seed core data (admin user + mock suppliers).
+
+    If an old-schema database is present, it is dropped and recreated — demo
+    data is disposable by design.
+    """
+    if _is_stale_schema(engine):
+        reset_db(engine)
+    else:
+        init_db(engine)
+        _ensure_columns(engine)
+
+    from .seed import seed_core
+
     Session = session_factory(engine)
     with Session() as session:
-        for sup in data.suppliers:
-            if session.get(Supplier, sup.id) is None:
-                session.add(
-                    Supplier(
-                        id=sup.id,
-                        name=sup.name,
-                        allowed_origin=sup.origin,
-                        approval_status="allowed",
-                    )
-                )
-        session.commit()
+        seed_core(session)
 
 
-def _to_int(value) -> int | None:
-    try:
-        return int(str(value).strip())
-    except (ValueError, TypeError):
-        return None
-
-
-def persist_extraction(
+def upsert_product(
     session,
     *,
-    supplier_id: str,
-    product_id: str,
-    url: str,
-    fields: dict[str, object],
-    retrieved_at: datetime,
-) -> str:
-    """Persist extracted fields as an ``Offer`` plus one ``Evidence`` row each.
+    supplier_id: int,
+    product_key: str,
+    category: str,
+    model_name: str | None = None,
+    attributes: dict | None = None,
+    unit_price_minor: int | None = None,
+    shipping_minor: int | None = None,
+    available_quantity: int | None = None,
+    warranty_months: int | None = None,
+    delivery_days: int | None = None,
+    retrieved_at: datetime | None = None,
+) -> Product:
+    """Insert or refresh a product row keyed by (supplier_id, product_key).
 
-    Best-effort maps known field names onto ``Offer`` columns: ``available_units``
-    -> ``available_quantity`` and ``price_hkd`` -> ``unit_price_minor`` (via
-    tolerant HKD parsing). Returns the offer id.
+    Unknown facts stay ``None`` — never zero or invented defaults. Existing
+    known values are only overwritten when a fresh value is also known.
     """
-    from .money import parse_hkd_minor
+    import json
 
-    offer_id = f"{supplier_id}:{product_id}"
-    offer = session.get(Offer, offer_id)
-    if offer is None:
-        offer = Offer(id=offer_id, supplier_id=supplier_id, product_id=product_id)
+    retrieved_at = retrieved_at or datetime.now(timezone.utc)
 
-    if "available_units" in fields:
-        offer.available_quantity = _to_int(fields["available_units"])
-    if "price_hkd" in fields:
-        minor = parse_hkd_minor(fields["price_hkd"])
-        if minor is not None:
-            offer.unit_price_minor = minor
-
-    session.add(offer)
-    session.flush()
-
-    for field, value in fields.items():
-        session.add(
-            Evidence(
-                id=f"{offer_id}:{field}",
-                offer_id=offer_id,
-                url=url,
-                retrieved_at=retrieved_at,
-                field=field,
-                extracted_value=str(value),
-            )
+    product = (
+        session.query(Product)
+        .filter_by(supplier_id=supplier_id, product_key=product_key)
+        .one_or_none()
+    )
+    if product is None:
+        product = Product(
+            supplier_id=supplier_id, product_key=product_key, category=category
         )
+        session.add(product)
+
+    if model_name:
+        product.model_name = model_name
+    if attributes is not None:
+        product.attributes_json = json.dumps(attributes, ensure_ascii=False)
+    if unit_price_minor is not None:
+        product.unit_price_minor = unit_price_minor
+    if shipping_minor is not None:
+        product.shipping_minor = shipping_minor
+    if available_quantity is not None:
+        product.available_quantity = available_quantity
+    if warranty_months is not None:
+        product.warranty_months = warranty_months
+    if delivery_days is not None:
+        product.delivery_days = delivery_days
+    product.last_seen_at = retrieved_at
+
     session.commit()
-    return offer_id
+    session.refresh(product)
+    return product
