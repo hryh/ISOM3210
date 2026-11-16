@@ -90,6 +90,12 @@ def _users_page():
     users_page.render(engine, user)
 
 
+def _seller_contact_page():
+    from procurement.ui import seller_contact_page
+
+    seller_contact_page.render(engine, user)
+
+
 approvals_title = "Pending Approvals" + (f" ({pending_count})" if pending_count else "")
 
 pages = [
@@ -101,6 +107,11 @@ if is_manager:
     pages.append(
         st.Page(
             _approvals_page, title=approvals_title, icon=":material/fact_check:"
+        )
+    )
+    pages.append(
+        st.Page(
+            _seller_contact_page, title="Contact Sellers", icon=":material/chat:"
         )
     )
 pages.append(st.Page(_suppliers_page, title="Suppliers", icon=":material/storefront:"))

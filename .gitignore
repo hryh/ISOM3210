@@ -29,3 +29,6 @@ data/*.db
 #serena
 .serena/
 
+
+# Seller-contact attempts written by the Contact Sellers page
+data/seller_contacts.jsonl
