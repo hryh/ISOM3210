@@ -13,7 +13,10 @@ from dotenv import load_dotenv
 load_dotenv()
 
 st.set_page_config(
-    page_title="PurchasePilot", page_icon=":material/shopping_cart:", layout="wide"
+    page_title="PurchasePilot",
+    page_icon=":material/shopping_cart:",
+    layout="wide",
+    initial_sidebar_state="collapsed",
 )
 
 from procurement.ui.theme import apply_theme

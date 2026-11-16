@@ -65,7 +65,7 @@ class PurchaseRequest(BaseModel):
     quantity: int = Field(gt=0)
     currency: Currency = Currency.HKD
     max_total_cost_minor: int = Field(ge=0)
-    deadline: date
+    deadline: date | None = None
     mandatory: RequestRequirements
     preferences: dict[str, str] = Field(default_factory=dict)
     created_at: datetime

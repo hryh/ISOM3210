@@ -95,10 +95,8 @@ def _keyword_checks(req: RequestRequirements, offer: OfferEvidence) -> list[Fiel
     return checks
 
 
-#: Textual stock evidence (aggregator sites) counts as availability, with the
-#: count left unverified. Only these explicit in-stock phrases qualify.
-#: Out-of-stock is checked FIRST so "無存貨" is never mistaken for stock.
-_IN_STOCK_PATTERNS = ("有貨", "有存貨", "現貨", "in stock", "available")
+#: Explicit out-of-stock evidence still fails the quantity check — checked
+#: BEFORE the assumed-in-stock default so "無存貨" is never mistaken for stock.
 _OUT_OF_STOCK_PATTERNS = ("缺貨", "無存貨", "售罄", "已售完", "out of stock", "sold out")
 
 
@@ -107,44 +105,45 @@ def _quantity_check(
 ) -> FieldValidation:
     """Rule 3: a supplier must cover the entire quantity.
 
-    A numeric stock count at/above the quantity is full evidence. Aggregator
-    offers rarely show counts, so availability comes from the extractor's
-    classification ('in_stock' / 'low_stock' / 'preorder' pass with the count
-    left unverified; 'out_of_stock' fails) or — failing that — explicit
-    in-stock phrases in the raw text. Everything else is UNKNOWN. The raw
-    availability text is always kept for the human approver.
+    A numeric stock count below the requested quantity is the only hard
+    failure. Explicit out-of-stock evidence (classifier label or raw text)
+    also fails. Otherwise a product *listed for sale on the site* is assumed
+    available — checking deeper is redundant, so the check passes with the
+    count left unverified rather than degrading to UNKNOWN and blocking the
+    offer. The raw availability text is always kept for the human approver.
     """
-    if offer.available_quantity is None:
-        state = str(offer.attributes.get("stock_state") or "").lower()
-        if state in ("in_stock", "low_stock"):
-            note = "low stock" if state == "low_stock" else "in stock"
-            return _check(
-                "available_quantity",
-                ValidationStatus.PASS,
-                f"listed as {note} (count not shown)",
-            )
-        if state == "preorder":
-            return _check(
-                "available_quantity",
-                ValidationStatus.PASS,
-                "orderable, ships in a few days (count not shown)",
-            )
-        if state == "out_of_stock":
-            return _check("available_quantity", ValidationStatus.FAIL, "listed as out of stock")
-        # Fall back to the raw availability text.
-        stock_status = str(offer.attributes.get("stock_status") or "").lower()
-        if any(p in stock_status for p in _OUT_OF_STOCK_PATTERNS):
-            return _check("available_quantity", ValidationStatus.FAIL, "listed as out of stock")
-        if any(p in stock_status for p in _IN_STOCK_PATTERNS):
-            return _check(
-                "available_quantity",
-                ValidationStatus.PASS,
-                "listed as in stock (count not shown)",
-            )
-        return _check("available_quantity", ValidationStatus.UNKNOWN, "available quantity not extracted")
-    if offer.available_quantity < request.quantity:
-        return _check("available_quantity", ValidationStatus.FAIL, "insufficient stock for full quantity")
-    return _check("available_quantity", ValidationStatus.PASS, "sufficient stock for full quantity")
+    if offer.available_quantity is not None:
+        if offer.available_quantity < request.quantity:
+            return _check("available_quantity", ValidationStatus.FAIL, "insufficient stock for full quantity")
+        return _check("available_quantity", ValidationStatus.PASS, "sufficient stock for full quantity")
+
+    state = str(offer.attributes.get("stock_state") or "").lower()
+    if state == "out_of_stock":
+        return _check("available_quantity", ValidationStatus.FAIL, "listed as out of stock")
+    stock_status = str(offer.attributes.get("stock_status") or "").lower()
+    if any(p in stock_status for p in _OUT_OF_STOCK_PATTERNS):
+        return _check("available_quantity", ValidationStatus.FAIL, "listed as out of stock")
+
+    if state in ("in_stock", "low_stock"):
+        note = "low stock" if state == "low_stock" else "in stock"
+        return _check(
+            "available_quantity",
+            ValidationStatus.PASS,
+            f"listed as {note} (count not shown)",
+        )
+    if state == "preorder":
+        return _check(
+            "available_quantity",
+            ValidationStatus.PASS,
+            "orderable, ships in a few days (count not shown)",
+        )
+    # No availability information at all: a product listed for sale on the
+    # site is assumed in stock — never UNKNOWN, never a blocker.
+    return _check(
+        "available_quantity",
+        ValidationStatus.PASS,
+        "listed for sale — assumed in stock (count not verified)",
+    )
 
 
 def _check(

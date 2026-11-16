@@ -9,8 +9,11 @@ from __future__ import annotations
 import streamlit as st
 
 from .. import order_service
+from ..evaluation import counts as verdict_counts
+from ..evaluation import order_verdicts
 from ..repository import User, session_factory
 from .common import hkd, pretty_requirements, require_manager, status_badge
+from .run_console import comparison_csv, offers_html, slip_html
 
 
 def _approve(engine, user: dict, order_id: int) -> None:
@@ -66,7 +69,6 @@ def render(engine, user: dict) -> None:
             order = order_service.get_order(session, order.id)  # fresh copy
             view = order_service.order_view(session, order)
             product = view.product
-            supplier = view.supplier
 
             with st.container(border=True):
                 st.markdown(
@@ -81,7 +83,7 @@ def render(engine, user: dict) -> None:
                     st.markdown(
                         f"- **Quantity:** {order.quantity}\n"
                         f"- **Budget (max):** {hkd(order.budget_minor)}\n"
-                        f"- **Deadline:** {order.deadline}\n"
+                        f"- **Needed by:** {order.deadline or '— (decide later)'}\n"
                         f"- **Requester:** "
                         f"{view.requester.display_name if view.requester else '—'} "
                         f"({order.department})\n"
@@ -93,26 +95,26 @@ def render(engine, user: dict) -> None:
                     if product is None:  # pragma: no cover - defensive
                         st.warning("No product selected on this order.")
                     else:
-                        over = ""
-                        if (
-                            view.total_minor is not None
-                            and view.total_minor > order.budget_minor
-                        ):
-                            over = " (over budget)"
+                        verdicts = order_verdicts(session, order)
+                        c = verdict_counts(verdicts)
                         st.markdown(
-                            f"- **Supplier:** "
-                            f"{supplier.name if supplier else '—'}\n"
-                            f"- **Product:** "
-                            f"{product.model_name or product.product_key}\n"
-                            f"- **Unit price:** {hkd(product.unit_price_minor)}\n"
-                            f"- **Shipping:** {hkd(product.shipping_minor)}\n"
-                            f"- **Total ({order.quantity} units):** "
-                            f"{hkd(view.total_minor)}{over}\n"
-                            f"- **Warranty:** "
-                            f"{product.warranty_months or '—'} months\n"
-                            f"- **Delivery:** "
-                            f"{product.delivery_days if product.delivery_days is not None else '—'} days"
+                            slip_html(order, view, c["PASS"]),
+                            unsafe_allow_html=True,
                         )
+                        with st.expander(
+                            f"All offers checked ({len(verdicts)})", expanded=False
+                        ):
+                            st.markdown(
+                                offers_html(verdicts), unsafe_allow_html=True
+                            )
+                            st.download_button(
+                                "Download comparison",
+                                data=comparison_csv(verdicts),
+                                file_name=f"comparison_{order.order_no}.csv",
+                                mime="text/csv",
+                                key=f"approve_csv_{order.id}",
+                                use_container_width=True,
+                            )
 
                 act1, act2 = st.columns(2)
                 if act1.button("Approve", key=f"approve_{order.id}", type="primary"):

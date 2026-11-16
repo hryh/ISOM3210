@@ -28,7 +28,7 @@ from urllib.parse import quote_plus
 
 from pydantic import BaseModel, Field
 
-from ..catalog import CATEGORIES, OTHER_CATEGORY
+from ..catalog import BOOL, CATEGORIES, INT, LIST, OTHER_CATEGORY
 from ..money import parse_hkd_minor
 from ..schemas import (
     ComparisonResult,
@@ -89,6 +89,9 @@ class _ShopOffer(BaseModel):
 
 class _ProductDetails(BaseModel):
     specifications: str | None = None
+    #: Typed category attributes extracted from the spec text, normalized to
+    #: the catalog's canonical values ("FHD"/"1920X1080" -> "1920x1080").
+    attributes: dict[str, Any] | None = None
     offers: list[_ShopOffer] = Field(default_factory=list)
 
 
@@ -108,10 +111,22 @@ def _slug(text: str) -> str:
 
 
 def _search_phrase(request: PurchaseRequest) -> str:
-    """The natural-language phrase used to search an aggregator site."""
+    """The natural-language phrase used to search an aggregator site.
+
+    For free-text requests the required keywords join the item description so
+    brand/model terms ("Thinkpad") actually reach the site's search box —
+    otherwise the query is just the generic item ("laptop") and the keyword
+    can only ever reject offers, never find them.
+    """
     req = request.mandatory
     if req.category == OTHER_CATEGORY:
-        return str(req.attributes.get("item") or "").strip()
+        parts = [str(req.attributes.get("item") or "").strip()]
+        parts.extend(
+            str(k).strip()
+            for k in (req.attributes.get("keywords") or [])
+            if str(k).strip()
+        )
+        return " ".join(p for p in parts if p)
     spec = CATEGORIES.get(req.category)
     parts = [spec.label] if spec else [req.category]
     for key, value in (req.attributes or {}).items():
@@ -387,14 +402,66 @@ def _listing_instruction(phrase: str) -> str:
     )
 
 
-def _product_instruction(product_name: str) -> str:
+def _typed_attribute_hints(category: str) -> str:
+    """Extraction guidance per catalog attribute, with normalization rules.
+
+    Only typed categories use this; "other" keeps the free specifications
+    text. Values are normalized to the catalog's canonical choices so the
+    deterministic rules engine can compare them exactly.
+    """
+    spec = CATEGORIES.get(category)
+    if spec is None:
+        return ""
+    lines = []
+    for attr in spec.attributes:
+        if attr.type == INT:
+            lines.append(
+                f"- '{attr.display_name}': the number as an integer "
+                f"(e.g. 27); null if not stated"
+            )
+        elif attr.type == BOOL:
+            lines.append(
+                f"- '{attr.display_name}': true or false; null if not stated"
+            )
+        elif attr.type == LIST:
+            lines.append(
+                f"- '{attr.display_name}': a list of the values that appear, "
+                f"chosen from {list(attr.choices)} (e.g. 'HDMI x1, DP' -> "
+                "[\"HDMI\", \"DisplayPort\"]); null if not stated"
+            )
+        elif attr.choices:
+            lines.append(
+                f"- '{attr.display_name}': normalize to exactly one of "
+                f"{list(attr.choices)} (e.g. FHD/1080p/1920X1080 -> "
+                "\"1920x1080\"); null if not stated"
+            )
+        else:
+            lines.append(f"- '{attr.display_name}': the stated value; null if not stated")
+    return "\n".join(lines)
+
+
+def _product_instruction(product_name: str, request: PurchaseRequest) -> str:
+    category = request.mandatory.category
+    typed_hints = _typed_attribute_hints(category)
+    attributes_part = ""
+    if typed_hints:
+        attributes_part = (
+            "First, 'attributes': an object describing THIS product, "
+            "reading its specification text, with these keys (normalize "
+            "variants to the canonical values; never guess a value the page "
+            "does not state):\n"
+            f"{typed_hints}\n"
+        )
     return (
-        f"This is a price-comparison page for: {product_name}. Extract two "
-        "things. First, 'specifications': the product's specification text "
+        f"This is a price-comparison page for: {product_name}. Extract "
+        + ("three" if typed_hints else "two")
+        + " things. "
+        + attributes_part
+        + "Next, 'specifications': the product's specification text "
         "shown on this page as one string — TRANSLATE it into English if it is "
         "in another language (keep model names, brands and numbers exactly as "
         "shown; translate feature terms like 降噪 to 'noise cancelling'). "
-        "Second, 'offers': a list of up to "
+        "Finally, 'offers': a list of up to "
         f"{MAX_OFFERS_PER_PRODUCT} seller offers shown on this page, each with "
         "shop_name (the seller/shop name), price_hkd (the offer price exactly "
         "as shown), warranty_text (warranty or goods-type info, e.g. 行貨/水貨, "
@@ -427,10 +494,13 @@ def _shop_offer_to_evidence(
         for part in (details.specifications, listing.description, listing.product_name)
         if part
     )
-    attributes: dict[str, Any] = {
-        "shop": shop,
-        "specifications": specifications,
-    }
+    attributes: dict[str, Any] = {}
+    # Typed specs from the product page, coerced to the catalog's keys so the
+    # deterministic rules can compare them (unknowns simply stay absent).
+    attributes.update(_coerce_attributes(category, details.attributes))
+    # Human-readable context and availability, always kept.
+    attributes["shop"] = shop
+    attributes["specifications"] = specifications
     if offer.stock_text:
         attributes["stock_status"] = offer.stock_text
     if offer.stock_state:
@@ -510,7 +580,7 @@ async def _research_aggregator(browser, request: PurchaseRequest, supplier, star
         details: _ProductDetails | None = None
         try:
             details = await browser.extract(
-                _product_instruction(item.product_name), _ProductDetails
+                _product_instruction(item.product_name, request), _ProductDetails
             )
         except Exception:
             details = None

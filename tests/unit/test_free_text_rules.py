@@ -83,14 +83,18 @@ def test_typed_categories_still_validate(make_request, make_offer):
 
 
 def test_stock_state_labels_pass(make_request):
-    """The extractor's availability classification feeds rule 3."""
+    """The extractor's availability classification feeds rule 3.
+
+    With no availability information at all, a product listed for sale is
+    assumed in stock — the check passes, never UNKNOWN.
+    """
     request = _other_request(make_request, ["noise cancelling"], quantity=1)
     for state, expected in (
         ("in_stock", ValidationStatus.PASS),
         ("low_stock", ValidationStatus.PASS),
         ("preorder", ValidationStatus.PASS),
         ("out_of_stock", ValidationStatus.FAIL),
-        (None, ValidationStatus.UNKNOWN),
+        (None, ValidationStatus.PASS),
     ):
         attrs = {"specifications": "noise cancelling headphones"}
         if state:
@@ -109,7 +113,7 @@ def test_in_stock_text_passes_quantity(make_request):
         result = validate_offer(request, offer)
         check = next(c for c in result.checks if c.field == "available_quantity")
         assert check.status is ValidationStatus.PASS
-        assert "count not shown" in check.reason
+        assert "count not verified" in check.reason  # assumed-in-stock caveat
 
 
 def test_while_stocks_last_is_not_out_of_stock(make_request):
@@ -123,7 +127,7 @@ def test_while_stocks_last_is_not_out_of_stock(make_request):
     )
     result = validate_offer(request, offer)
     check = next(c for c in result.checks if c.field == "available_quantity")
-    assert check.status is ValidationStatus.UNKNOWN  # neither in nor out of stock
+    assert check.status is ValidationStatus.PASS  # assumed in stock
 
 
 def test_out_of_stock_text_fails_quantity(make_request):
@@ -136,11 +140,16 @@ def test_out_of_stock_text_fails_quantity(make_request):
     assert check.status is ValidationStatus.FAIL
 
 
-def test_no_stock_evidence_is_unknown(make_request):
+def test_no_stock_evidence_assumes_in_stock(make_request):
+    """A product listed for sale on the site is assumed available — the
+    absence of stock information must not block the offer as UNKNOWN."""
     request = _other_request(make_request, ["noise cancelling"], quantity=2)
     offer = _offer(attributes={"specifications": "noise cancelling"})
     result = validate_offer(request, offer)
-    assert result.status is ValidationStatus.UNKNOWN
+    check = next(c for c in result.checks if c.field == "available_quantity")
+    assert check.status is ValidationStatus.PASS
+    assert "assumed in stock" in check.reason
+    assert result.status is ValidationStatus.PASS
 
 
 def test_numeric_stock_still_works(make_request):
@@ -238,9 +247,29 @@ def test_search_phrase_other():
 
     request = _make_request_helper(
         category=OTHER_CATEGORY,
-        attributes={"item": "noise cancelling headphones", "keywords": ["x"]},
+        attributes={"item": "noise cancelling headphones", "keywords": ["bluetooth"]},
     )
-    assert _search_phrase(request) == "noise cancelling headphones"
+    assert _search_phrase(request) == "noise cancelling headphones bluetooth"
+
+
+def test_search_phrase_other_includes_brand_keyword():
+    from procurement.tools.suppliers import _search_phrase
+
+    request = _make_request_helper(
+        category=OTHER_CATEGORY,
+        attributes={"item": "Laptop", "keywords": ["Thinkpad"]},
+    )
+    assert _search_phrase(request) == "Laptop Thinkpad"
+
+
+def test_search_phrase_other_skips_empty_parts():
+    from procurement.tools.suppliers import _search_phrase
+
+    request = _make_request_helper(
+        category=OTHER_CATEGORY,
+        attributes={"item": "laptop", "keywords": ["", "  "]},
+    )
+    assert _search_phrase(request) == "laptop"
 
 
 def _make_request_helper(

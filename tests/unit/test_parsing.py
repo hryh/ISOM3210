@@ -85,12 +85,19 @@ def test_unknown_category_raises():
     assert "category" in exc.value.missing_fields
 
 
-def test_missing_required_attribute_raises():
+def test_unstated_specs_pass_through_as_no_preference():
+    """A spec the requester never stated is simply not enforced downstream."""
     draft = _draft(attributes={"screen_inches_min": 27})
-    with pytest.raises(ClarificationNeeded) as exc:
-        draft_to_request(draft, request_id="R1", requester="alice", now=NOW)
-    assert "attributes.resolution" in exc.value.missing_fields
-    assert "attributes.connectors" in exc.value.missing_fields
+    req = draft_to_request(draft, request_id="R1", requester="alice", now=NOW)
+    assert req.mandatory.attributes == {"screen_inches_min": 27}
+
+
+def test_empty_spec_values_are_dropped():
+    draft = _draft(
+        attributes={"screen_inches_min": 27, "resolution": "", "connectors": []}
+    )
+    req = draft_to_request(draft, request_id="R1", requester="alice", now=NOW)
+    assert req.mandatory.attributes == {"screen_inches_min": 27}
 
 
 def test_keyboard_draft_converts():

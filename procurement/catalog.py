@@ -97,3 +97,21 @@ def get_category(category: str | None) -> CategorySpec | None:
     if category is None:
         return None
     return CATEGORIES.get(category)
+
+
+def detect_category(text: str | None) -> str | None:
+    """Deterministically map a free-text request onto a typed category.
+
+    A plain substring match on the category label (covers plurals —
+    "monitors" contains "monitor"). Returns the category id, or ``None``
+    when nothing matches: the caller then routes the request to the
+    free-text keyword search flow, which works for anything. Detection only
+    ever picks the *validation contract* — it never blocks a request.
+    """
+    if not text:
+        return None
+    lowered = text.lower()
+    for category_id, spec in CATEGORIES.items():
+        if spec.label.lower() in lowered:
+            return category_id
+    return None

@@ -71,8 +71,6 @@ def draft_to_request(
         missing.append("department")
     if draft.max_total_hkd is None:
         missing.append("max_total_hkd")
-    if not draft.deadline:
-        missing.append("deadline")
     if missing:
         raise ClarificationNeeded(missing)
 
@@ -80,26 +78,28 @@ def draft_to_request(
     if budget_minor is None:
         raise ClarificationNeeded(["max_total_hkd"], "could not parse the budget")
 
-    deadline = _parse_deadline(draft.deadline)
-    if deadline is None:
+    # The delivery date is optional — it can be collected later when the
+    # supplier is contacted. A stated-but-unparseable date still asks for
+    # clarification rather than being silently dropped.
+    deadline = _parse_deadline(draft.deadline) if draft.deadline else None
+    if draft.deadline and deadline is None:
         raise ClarificationNeeded(["deadline"], "could not parse the deadline")
 
-    # Enforce required attributes for the chosen category.
+    # Specs are optional ("no preference"): only the attributes the requester
+    # actually stated are carried into the request, and the rules engine only
+    # enforces what is present. Empty values are dropped so the engine never
+    # compares against "" or an empty list.
     if draft.category == OTHER_CATEGORY:
         attributes = {
             "item": str(draft.attributes.get("item", "")).strip(),
             "keywords": [str(k).strip() for k in (draft.attributes.get("keywords") or []) if str(k).strip()],
         }
     else:
-        spec = CATEGORIES[draft.category]
-        attributes = dict(draft.attributes)
-        missing_attrs = [
-            f"attributes.{attr.name}"
-            for attr in spec.attributes
-            if attr.required and attributes.get(attr.name) in (None, "", [])
-        ]
-        if missing_attrs:
-            raise ClarificationNeeded(missing_attrs)
+        attributes = {
+            key: value
+            for key, value in draft.attributes.items()
+            if value not in (None, "", [])
+        }
 
     requirements = RequestRequirements(
         category=draft.category,

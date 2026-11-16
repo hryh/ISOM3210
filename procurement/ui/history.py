@@ -98,7 +98,7 @@ def render(engine, user: dict) -> None:
         st.markdown(
             f"- **Quantity:** {order.quantity}\n"
             f"- **Budget (max):** {hkd(order.budget_minor)}\n"
-            f"- **Deadline:** {order.deadline}\n"
+            f"- **Needed by:** {order.deadline or '— (decide later)'}\n"
             f"- **Requester:** "
             f"{view.requester.display_name if view.requester else '—'} "
             f"({order.department})\n"

@@ -90,7 +90,7 @@ def create_order(
     category: str,
     quantity: int,
     budget_minor: int,
-    deadline: date,
+    deadline: date | None,
     requirements: dict,
     preferences: dict | None = None,
     source: str = "wizard",
@@ -149,7 +149,7 @@ def update_draft_order(
     category: str,
     quantity: int,
     budget_minor: int,
-    deadline: date,
+    deadline: date | None,
     requirements: dict,
     preferences: dict | None = None,
 ) -> Order:

@@ -13,7 +13,7 @@ from typing import Any
 from ..catalog import CATEGORIES
 from ..schemas import RequestDraft
 
-PROMPT_VERSION = "v3"
+PROMPT_VERSION = "v4"
 
 
 def _category_summary() -> str:
@@ -45,8 +45,10 @@ a desk lamp, headphones…). For "other" set attributes to:
 Keep using out_of_scope only for things that are not products at all (e.g.
 rubber ducks, coffee, drones, services).
 
-Shared fields (all categories): warranty_months_min (integer), quantity (integer),
-max_total_hkd (number, HKD), deadline (ISO date "YYYY-MM-DD"), department (string),
+Shared fields: warranty_months_min (integer), quantity (integer),
+max_total_hkd (number, HKD), department (string),
+deadline (ISO date "YYYY-MM-DD", optional — leave null when the user has not
+decided; it can be collected later when the supplier is contacted),
 preferences (object).
 
 Your job: return ONLY a JSON object with these keys:
@@ -69,7 +71,7 @@ Current draft (merge into this — keep already-confirmed fields unless the user
 
 Rules:
 - Never invent a value the user did not state; leave it null.
-- If quantity, budget, deadline, or department are missing, set clarification_needed=true and list them in unclear_fields.
+- If quantity, budget, or department are missing, set clarification_needed=true and list them in unclear_fields. The deadline is optional: never ask for it, and leave it null when the user has not stated one.
 - Put any non-product item in out_of_scope and do NOT include it in the request.
 - For products outside the typed categories, use category "other" with the
   item/keywords attributes instead of out_of_scope.

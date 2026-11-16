@@ -93,7 +93,8 @@ class Order(Base):
     category: Mapped[str] = mapped_column(String)
     quantity: Mapped[int] = mapped_column(Integer)
     budget_minor: Mapped[int] = mapped_column(Integer)
-    deadline: Mapped[date] = mapped_column(Date)
+    #: Needed-by date — optional, collected later when the supplier is contacted.
+    deadline: Mapped[date | None] = mapped_column(Date, nullable=True)
     requirements_json: Mapped[str] = mapped_column(Text, default="{}")
     preferences_json: Mapped[str] = mapped_column(Text, default="{}")
     selected_product_id: Mapped[int | None] = mapped_column(
@@ -199,12 +200,37 @@ def _is_stale_schema(engine) -> bool:
     return bool(tables & {"requests", "runs", "offers", "evidence", "proposals"})
 
 
+def _rebuild_orders_nullable_deadline(engine, conn) -> None:
+    """Make orders.deadline nullable (SQLite cannot ALTER a NOT NULL).
+
+    The needed-by date became optional (collected later from the supplier),
+    but existing databases carry ``deadline DATE NOT NULL``. Rebuild the table
+    with the model's current schema: create a copy, transfer the rows, swap.
+    Runs with foreign keys disabled on this connection (the same listener
+    turns them on for every new connection, so disable explicitly).
+    """
+    from sqlalchemy.schema import CreateTable
+
+    table = Base.metadata.tables["orders"]
+    ddl = str(CreateTable(table).compile(dialect=engine.dialect))
+    columns = ", ".join(f'"{c.name}"' for c in table.columns)
+
+    conn.exec_driver_sql("PRAGMA foreign_keys=OFF")
+    conn.exec_driver_sql("DROP TABLE IF EXISTS orders_new")
+    # The temporary table's self-declaring DDL references the final table
+    # names — harmless while foreign keys are off.
+    conn.exec_driver_sql(ddl.replace("CREATE TABLE orders", "CREATE TABLE orders_new", 1))
+    conn.exec_driver_sql(f"INSERT INTO orders_new ({columns}) SELECT {columns} FROM orders")
+    conn.exec_driver_sql("DROP TABLE orders")
+    conn.exec_driver_sql("ALTER TABLE orders_new RENAME TO orders")
+
+
 def _ensure_columns(engine) -> None:
     """Lightweight auto-migration: add missing columns to existing tables.
 
     SQLite ``create_all`` never alters existing tables, so a DB created before
-    a column existed would crash at runtime. Each new column is registered
-    here with the exact ALTER statement to apply.
+    a schema change would crash at runtime. New columns are registered with
+    ALTER statements; constraint loosening goes through the rebuild helper.
     """
     from sqlalchemy import inspect, text
 
@@ -215,7 +241,19 @@ def _ensure_columns(engine) -> None:
     existing = set(inspector.get_table_names())
     if not existing:
         return  # fresh DB — create_all builds the current schema anyway
-    with engine.begin() as conn:
+
+    # orders.deadline: NOT NULL -> nullable (needed-by is now optional).
+    orders_needs_rebuild = False
+    if "orders" in existing:
+        deadline_col = next(
+            (c for c in inspector.get_columns("orders") if c["name"] == "deadline"),
+            None,
+        )
+        orders_needs_rebuild = deadline_col is not None and not deadline_col.get(
+            "nullable", True
+        )
+
+    with engine.connect().execution_options(isolation_level="AUTOCOMMIT") as conn:
         for table, statements in migrations.items():
             if table not in existing:
                 continue
@@ -224,6 +262,8 @@ def _ensure_columns(engine) -> None:
                 column = statement.split("ADD COLUMN ", 1)[1].split()[0]
                 if column not in columns:
                     conn.execute(text(statement))
+        if orders_needs_rebuild:
+            _rebuild_orders_nullable_deadline(engine, conn)
 
 
 def init_and_seed(engine) -> None:

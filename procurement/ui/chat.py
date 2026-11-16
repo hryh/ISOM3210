@@ -86,7 +86,7 @@ def _draft_markdown(d: RequestDraft) -> str:
                 )
     lines.append(f"- **Minimum warranty:** {d.warranty_months_min or '—'} months")
     lines.append(f"- **Budget (max):** HK${d.max_total_hkd}")
-    lines.append(f"- **Deadline:** {d.deadline or '—'}")
+    lines.append(f"- **Needed by:** {d.deadline or '— (decide later)'}")
     lines.append(f"- **Department:** {d.department or '—'}")
     if d.preferences:
         lines.append(f"- **Preferences:** {d.preferences}")
