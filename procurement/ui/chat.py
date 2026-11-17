@@ -12,7 +12,7 @@ import asyncio
 
 import streamlit as st
 
-from .. import chat_service, order_service
+from .. import chat_service, order_service, seller_inquiry
 from ..catalog import CATEGORIES, OTHER_CATEGORY
 from ..llm.adapter import ConfigurableLLM
 from ..parsing import ClarificationNeeded, draft_to_request
@@ -105,6 +105,94 @@ def _assistant(Session, row, text: str) -> None:
             Session.commit()
 
 
+def _inquiry_key(row) -> str:
+    return f"seller_inquiry_{row.id}"
+
+
+def _offer_seller_contact(Session, row, prompt: str, pq) -> None:
+    """Answer a product question briefly and offer to contact the seller."""
+    parts = [pq.reply] if pq.reply else []
+    parts.append(
+        "The seller can confirm the details. **Would you like to contact the seller "
+        "for more info?** Your request draft stays as it is either way."
+    )
+    msg = "\n\n".join(parts)
+    with st.chat_message("assistant"):
+        st.markdown(msg)
+    _assistant(Session, row, msg)
+    st.session_state[_inquiry_key(row)] = {
+        "stage": "offer", "question": prompt, "product": pq.product,
+    }
+
+
+def _render_seller_inquiry(Session, row, user: dict) -> None:
+    """Yes/No offer, then an editable message the employee sends themselves."""
+    key = _inquiry_key(row)
+    inq = st.session_state.get(key)
+    if not inq:
+        return
+    draft = st.session_state.get("draft")
+    department = getattr(draft, "department", None) or None
+
+    with st.container(border=True):
+        if inq["stage"] == "offer":
+            st.markdown("**Contact the seller for more info?**")
+            c1, c2 = st.columns(2)
+            if c1.button("Yes, write to the seller", key=f"inq_yes_{row.id}", type="primary"):
+                inq["stage"] = "compose"
+                st.rerun()
+            if c2.button("No thanks", key=f"inq_no_{row.id}"):
+                st.session_state.pop(key, None)
+                _assistant(Session, row, "No problem. Carry on with your request whenever you're ready.")
+                st.rerun()
+            return
+
+        phone = seller_inquiry.seller_phone()
+        st.markdown(f"**Message to the seller** (WhatsApp {phone})")
+        st.caption("Edit it as you like. Nothing is sent until you press Send.")
+        text = st.text_area(
+            "Your message",
+            value=seller_inquiry.default_message(
+                inq["question"], employee=user["display_name"],
+                department=department, product=inq.get("product"),
+            ),
+            key=f"inq_text_{row.id}",
+            height=170,
+        )
+        ready = seller_inquiry.contact_configured()
+        if not ready:
+            st.info("Seller contact isn't set up on this server "
+                    "(GROK_WEBHOOK_URL / GROK_WEBHOOK_AUTHORIZATION).")
+        if inq.get("error"):
+            st.warning(inq["error"])
+        c1, c2 = st.columns(2)
+        if c1.button("Send to seller", key=f"inq_send_{row.id}", type="primary",
+                     disabled=not (ready and text.strip())):
+            with st.spinner("Sending your message to the seller…"):
+                result = seller_inquiry.send_inquiry(
+                    text, employee=user["display_name"], department=department,
+                    product=inq.get("product"), chat_ref=f"chat-{row.id}",
+                )
+            if result.sent:
+                st.session_state.pop(key, None)
+                st.session_state.pop(f"inq_text_{row.id}", None)
+                quoted = "\n".join(f"> {line}" if line else ">" for line in text.strip().splitlines())
+                _assistant(
+                    Session, row,
+                    f"Sent to the seller on WhatsApp ({phone}), reference **{result.order_id}**:\n\n"
+                    f"{quoted}\n\nYou can keep refining your request meanwhile.",
+                )
+            else:
+                hint = (" Check whether it arrived before sending again."
+                        if result.status == "uncertain" else "")
+                inq["error"] = f"Not sent: {result.detail}{hint}"
+            st.rerun()
+        if c2.button("Cancel", key=f"inq_cancel_{row.id}"):
+            st.session_state.pop(key, None)
+            st.session_state.pop(f"inq_text_{row.id}", None)
+            st.rerun()
+
+
 def render(engine, user: dict) -> None:
     st.title("Chatbot")
     st.caption(
@@ -167,6 +255,16 @@ def render(engine, user: dict) -> None:
             with st.chat_message("user"):
                 st.markdown(prompt)
 
+            # A question about a product: answer briefly, offer to ask the seller,
+            # and leave the request draft untouched.
+            current = st.session_state.get("draft")
+            pq = seller_inquiry.classify(
+                prompt, _draft_markdown(current) if current is not None else ""
+            )
+            if pq is not None:
+                _offer_seller_contact(session, row, prompt, pq)
+                st.rerun()
+
             try:
                 draft = _update_draft(prompt, st.session_state.draft)
             except Exception as exc:  # network / key / parse failure
@@ -218,6 +316,9 @@ def render(engine, user: dict) -> None:
             with st.chat_message("assistant"):
                 st.markdown(summary)
             _assistant(session, row, summary)
+
+        # ---- optional: ask the seller about a product (before Confirm) -----
+        _render_seller_inquiry(session, row, user)
 
         # ---- confirm / edit ------------------------------------------------
         st.session_state.setdefault("draft", None)
