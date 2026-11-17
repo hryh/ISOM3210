@@ -51,32 +51,38 @@ def _auth_value(raw: str) -> str:
     return raw
 
 
-def request_whatsapp_draft(order_id: str, *, timeout: float = TIMEOUT_S) -> ContactResult:
-    """POST ``{"event": "order_confirmed", "order_id": ...}`` to the routine."""
-    order_id = str(order_id)
+def post_event(payload: dict, ref: str, *, timeout: float = TIMEOUT_S) -> ContactResult:
+    """POST one JSON event to the routine's webhook. ``ref`` labels the result
+    (an order number, or an inquiry id)."""
     url, auth = os.environ.get(URL_ENV, ""), os.environ.get(AUTH_ENV, "")
     if not (url and auth):
-        return ContactResult(order_id, False, "not_configured",
+        return ContactResult(ref, False, "not_configured",
                              f"Set {URL_ENV} and {AUTH_ENV} to enable seller contact.")
     req = urllib.request.Request(
         url,
-        data=json.dumps({"event": "order_confirmed", "order_id": order_id}).encode(),
+        data=json.dumps(payload).encode(),
         headers={"Authorization": _auth_value(auth), "Content-Type": "application/json"},
         method="POST",
     )
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
-            return ContactResult(order_id, True, "sent", f"HTTP {resp.status}")
+            return ContactResult(ref, True, "sent", f"HTTP {resp.status}")
     except urllib.error.HTTPError as exc:
-        return ContactResult(order_id, False, "failed", f"The routine answered HTTP {exc.code}.")
+        return ContactResult(ref, False, "failed", f"The routine answered HTTP {exc.code}.")
     except (TimeoutError, socket.timeout):
-        return ContactResult(order_id, False, "uncertain",
+        return ContactResult(ref, False, "uncertain",
                              "No answer within 20 seconds; the request may still have arrived.")
     except urllib.error.URLError as exc:
         if isinstance(exc.reason, (TimeoutError, socket.timeout)):
-            return ContactResult(order_id, False, "uncertain",
+            return ContactResult(ref, False, "uncertain",
                                  "No answer within 20 seconds; the request may still have arrived.")
-        return ContactResult(order_id, False, "failed", f"Could not reach the routine ({exc.reason}).")
+        return ContactResult(ref, False, "failed", f"Could not reach the routine ({exc.reason}).")
+
+
+def request_whatsapp_draft(order_id: str, *, timeout: float = TIMEOUT_S) -> ContactResult:
+    """POST ``{"event": "order_confirmed", "order_id": ...}`` to the routine."""
+    order_id = str(order_id)
+    return post_event({"event": "order_confirmed", "order_id": order_id}, order_id, timeout=timeout)
 
 
 # --- Contact log -------------------------------------------------------------
